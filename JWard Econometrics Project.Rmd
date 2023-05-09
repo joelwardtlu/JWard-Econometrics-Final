@@ -1,0 +1,343 @@
+---
+title: "Econometrics Final"
+author: "Joel Ward"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggformula)
+library(psych)
+library(car)
+library(MASS)
+library(lmtest)
+library(car)
+library(regclass)
+#level of aggregation: users of BoardGameGeek.com
+#Load file to backup
+games.bckup <- read.csv("~/games.csv")
+```
+## Introduction
+Board games are a large industry across the world, and nearly every first-world household possesses at least one board game.  
+The purpose of this project is to examine a dataset regarding board games from BoardGameGeek.com and create a predictive model to allow board game creators to know what factors contribute to the number of sales of a given game.
+
+This data is an aggregation of reviews per game by users of BoardGameGeek.com. Individual reviews are not identifiable.  
+While there is a column for the year release for each game, the data does not included changes over time, and the 'Year' column is used as a continuous independent variable. Therefore, we consider this data to be cross-sectional.
+
+## Data
+```{r games}
+#Load backup to primary dataframe
+games <- games.bckup
+
+#Remove Description, ImagePath, NumWeightVotes, and Family columns, as these are not useful for regression
+#Data source documentation describes NumWeightVotes as '? Unknown'
+#Families indicates what franchise of game an entry falls under, if any. This is not useful for our prediction, as we are not assuming we can print from any given intellectual property
+games = subset(games, select = -c(Description,ImagePath,NumWeightVotes,Family) )
+```
+## Data Exploration
+```{r NumOwned}
+#Show Initial statistics on NumOwned, the variable to predict
+summary(games$NumOwned)
+games %>%
+    ggplot(aes(y=NumOwned)) +
+    geom_boxplot()
+#These show that, while there is a wide range, most of the data is concentrated on the low end
+
+#How much of the data is at the lowest end? How low?
+nrow(games) 
+nrow(filter(games,NumOwned > 0))
+nrow(filter(games,NumOwned > 100))
+nrow(filter(games,NumOwned > 1000))
+nrow(filter(games,NumOwned > 2500))
+
+#Visualize the subset of games with more than 2500 owners
+subset(games,games$NumOwned > 2500) %>%
+    ggplot(aes(y=NumOwned)) +
+    geom_boxplot()
+
+#Because we intend to predict the factors that result in high sales, we would rather deal with less data than flood the model with low-sales data, which could impair our predictive ability.
+#Therefore, we remove rows containing games that show less than 2500 owners
+games<- filter(games,NumOwned > 2500)
+```
+```{r missing values}
+#We would have checked for missing values earlier, but most rows with missing data are removed by taking only NumOwned > 2500
+#Showing the missing rows before this operation is excessively lengthy
+#Check for missing values
+sum(is.na(games))
+games[!complete.cases(games),]
+games$ComAgeRec <- ifelse(is.na(games$ComAgeRec),0,games$ComAgeRec)
+games$LanguageEase <- ifelse(is.na(games$LanguageEase),0,games$LanguageEase)
+games[!complete.cases(games),]
+```
+```{r BestPlayers}
+#Initial statistics of BestPlayers column
+summary(games$BestPlayers)
+#This shows a trend of mostly zeros in this column
+sum(games$BestPlayers==0)
+nrow(games)
+nrow(filter(games,BestPlayers > 0))
+#These confirm this trend, BestPlayers does not appear to be useful
+```
+```{r GoodPlayers}
+#Summary of GoodPlayers
+summary(games$GoodPlayers)
+#This is a character variable, not useful for regression
+```
+```{r NumComments}
+#Summary of NumComments
+summary(games$NumComments)
+unique(games$NumComments)
+#This variable is not useful for regression
+```
+```{r Binary Vars}
+str(games)
+#confirm these variables are binary
+unique(games$IsReimplementation)
+unique(games$Kickstarted)
+unique(games$Cat.Thematic)
+unique(games$Cat.Strategy)
+unique(games$Cat.War)
+unique(games$Cat.Family)
+unique(games$Cat.CGS)
+unique(games$Cat.Abstract)
+unique(games$Cat.Party)
+unique(games$Cat.Childrens)
+#They are binary
+
+#Check how many of games fall into these groups
+games %>% count(IsReimplementation)
+games %>% count(Kickstarted)
+games %>% count(Cat.Thematic)
+games %>% count(Cat.Strategy)
+games %>% count(Cat.War)
+games %>% count(Cat.Family)
+games %>% count(Cat.CGS)
+games %>% count(Cat.Abstract)
+games %>% count(Cat.Party)
+games %>% count(Cat.Childrens)
+#Of these groups, the most are strategy games, family games, and reimplementations
+#The least are a card games, childrens games, and abstract games
+```
+```{r Ranks}
+#Initial statistics of first appearing subgroup rank
+#Strategy games
+summary(games$Rank.strategygames)
+#This summary shows that the Median, 3rd Quartile, and Maximum are all equal to 21926
+
+head(games[,c('Rank.strategygames','Cat.Strategy')],10)
+#By viewing the rank values and category indicator together we see that games not in the category have rank values of 21926
+
+
+#We will replace the 21926 values in each subgroup with zero values
+games$Rank.strategygames <- ifelse(games$Rank.strategygames==21926,0,games$Rank.strategygames)
+games$Rank.abstracts <- ifelse(games$Rank.abstracts==21926,0,games$Rank.abstracts)
+games$Rank.familygames <- ifelse(games$Rank.familygames==21926,0,games$Rank.familygames)
+games$Rank.thematic <- ifelse(games$Rank.thematic==21926,0,games$Rank.thematic)
+games$Rank.cgs <- ifelse(games$Rank.cgs==21926,0,games$Rank.cgs)
+games$Rank.wargames <- ifelse(games$Rank.wargames==21926,0,games$Rank.wargames)
+games$Rank.partygames <- ifelse(games$Rank.partygames==21926,0,games$Rank.partygames)
+games$Rank.childrensgames <- ifelse(games$Rank.childrensgames==21926,0,games$Rank.childrensgames)
+#This removal will alter the predictive ability of these variables, but we do not expect this alteration to be greatly significant
+
+#Initial statistics of Rank.boardgame
+summary(games$Rank.boardgame)
+#This column appears regular, and does not have the problems of the subgroups
+```
+```{r Categories ANOVA}
+summary(subset(games$NumOwned,(games$Cat.Abstract+games$Cat.Thematic+games$Cat.Strategy+games$Cat.War+games$Cat.Family+games$Cat.CGS+games$Cat.Party+games$Cat.Childrens > 1)))
+
+summary(games$NumOwned)
+summary(subset(games$NumOwned,games$Cat.Family==1))
+
+summary(aov(NumOwned ~ Cat.Abstract+Cat.Family+Cat.Strategy+Cat.War+Cat.CGS+Cat.Party+Cat.Childrens,data = games))
+summary(aov(NumOwned ~ Cat.Abstract*Cat.Family*Cat.Strategy*Cat.War*Cat.CGS*Cat.Party*Cat.Childrens,data = games))
+summary(aov(NumOwned ~ Cat.Family*Cat.Strategy,data = games))
+
+summary(aov(NumOwned ~ Rank.abstracts+Rank.familygames+Rank.strategygames+Rank.wargames+Rank.cgs+Rank.partygames+Rank.childrensgames,data = games))
+```
+```{r GameWeight}
+#GameWeight exploration
+summary(games$GameWeight)
+#Game weights are on a 0 to 5 scale
+#We will visualize this variable
+gf_histogram(games, ~GameWeight)
+gf_plot(games, x = ~GameWeight, y = ~NumOwned)%>%
+  gf_density_2d() %>%
+  gf_point()
+
+
+#There doesn't appear to be much of a linear relationship but there may be some quadratic relationship, so we will test this now
+games$gweightsq <- games$GameWeight*games$GameWeight
+summary(lm(NumOwned~GameWeight+gweightsq, data = games))
+
+#We concluced that Gameweight is not useful linearly or quadratically
+#We will also discard NumComments, BestPlayers, and GoodPlayers at this point
+games = subset(games, select = -c(GameWeight,gweightsq,NumComments,BestPlayers,GoodPlayers) )
+```
+```{r Kickstarted}
+#Lets take a look at Kickstarted games, and how does their popularity compare
+#Make Kickstarted a factor to better facilitate upcoming work
+games$Kickstarted <- as.factor(games$Kickstarted)
+
+#Summary
+summary(games$Kickstarted)
+#Visualize with a boxplot
+games %>%
+    ggplot(aes(x=Kickstarted, y=NumOwned)) +
+    geom_boxplot()
+
+#Compare mean NumOwned for Kickstarted and non-Kickstarted games
+games %>%
+  group_by((Kickstarted)) %>%
+  summarize(mean = mean(NumOwned))
+
+#Visualize the difference between the groups with a histogram
+ggplot(games, aes(x = NumOwned)) +
+  geom_histogram(aes(color = Kickstarted), fill = "white",
+                position = "identity", bins = 30) +
+  scale_color_manual(values = c("#00AFBB", "#E7B800"))
+
+#Is the ratio of wished for to owned games different for Kickstarted games?
+#Are people more likely to purchase a game they are reasonably sure they like if it is a Kickstarter?
+games$wish.own <- (games$NumWish/games$NumOwned)
+summary(games$wish.own)
+#This summary indicated a generally very low ratio
+
+#Compare W/O ratio for kickstarted games
+games %>%
+  group_by((Kickstarted)) %>%
+  summarize(mean = mean(wish.own))
+
+#Visualize with a pair of boxplots
+games %>%
+    ggplot(aes(x=Kickstarted, y=wish.own)) +
+    geom_boxplot()
+
+#Do a t test to see if difference in means is significant
+t.test(wish.own ~ as.numeric(Kickstarted),data = games)
+#This tells us that the difference is statistically significant, 
+```
+```{r rating score, warning=FALSE}
+games$rating.score <- (ifelse(games$AvgRating > 8, 'high',
+                      ifelse(games$AvgRating > 6, 'good',
+                      ifelse(games$AvgRating > 4, 'ok',
+                      ifelse(games$AvgRating > 2, 'low',
+                      'bad')))))
+
+games %>%
+  arrange(AvgRating) %>%
+  mutate(rating.score = factor(rating.score, levels=c("bad", "low", "ok", "good", "high"))) %>%
+    ggplot(aes(x=rating.score, y=NumOwned)) +
+    geom_boxplot()
+sum(games$AvgRating < 2)
+#Removing the least owned games also removed the worst rated games
+#Compare number of 'good' entries to 'high' entries
+sum(games$rating.score == 'good')
+sum(games$rating.score == 'high')
+```
+```{r pairspanels}
+#We will now run pairs.panels to see relationship between NumOwned and other variables, and relations between the independent variables 
+pairs.panels(games[,c(11, 1,3,4,5,6,7)],stars = TRUE)
+pairs.panels(games[,c(11, 8,9,10,11,12,13)],stars = TRUE)
+pairs.panels(games[,c(11, 14,15,16,17,18,19)],stars = TRUE)
+pairs.panels(games[,c(11, 20,21,22,23,24)],stars = TRUE)
+pairs.panels(games[,c(11, 25,26,27,28,29)],stars = TRUE)
+pairs.panels(games[,c(11, 30,31,32,33)],stars = TRUE)
+pairs.panels(games[,c(11, 34,35,36,37,38)],stars = TRUE)
+pairs.panels(games[,c(11, 39,40,41,42)],stars = TRUE)
+
+
+#Num User Rating is not a significant predictor, as most persons who review a game purchase the game before reviewing it
+#Additionally, we will not include NumWish or NumWant, as these indicate how well a game is likely, but do not provide predictive ability to determine how well a game is expected to be liked
+```
+From these panels, we determine that BayesAvgRating, LanguageEase, ComMinPlaytime, NumAlternates, NumExpansions, NumImplementations, Rank.boardgame, Rank.strategygames, Rank.familygames, Rank.wargames, Rank.wargames, Cat.Family, Cat.War, Cat.Strategy, and Rating.score appear most useful, and will be entered into our prediction model.
+
+## Linear Regression
+For our prediction, we will use a multivariate linear regression model, of the form  $$y = \beta_{0} + \beta_{1}x_{1}... \beta_{k}x_{k}+u$$
+This form of regression model is of similar function to a single variable model, but allows more factors. Compared to other model, though, it's comparatively simple nature may mean it is less precise.
+However, given the data set, most other forms of model simply are not necessary. For example, as the data is cross-sectional and has no time-dependant component, a time-series regression of the form $$y = \beta_{0t} + \beta_{1t}x_{1t}... \beta_{kt}x_{kt}+ u_{t}$$ would be overcomplicated to no gain.
+A multivariable linear model such as this is subject to the classical linear model assumptions, namely linear parameters, random sampling, no perfect collinearity, assumption of zero conditional mean , homoskedasticity, and an independent and normal error.
+If any of these assumptions are violated, we lose confidence in the exact predictive power of the model. For the time being, we will proceed under the assumption we meet these criteria, and re-examine them after the model is constructed.
+
+We have already selected the variables to go into the model, as above, to our model will take the form of 
+$$NumOwned = \beta_{0} +\beta_{1}BayesAvgRating+ \beta_{2}LanguageEase+ \beta_{3}ComMinPlaytime+ \beta_{4}NumAlternates+ \beta_{5}NumExpansions+ \beta_{6}NumImplementations+ \beta_{7}Rank.boardgame+ \beta_{8}Rank.strategygames+ \beta_{9}Rank.familygames+ \beta_{10}Rank.wargames+ \beta_{11}Cat.Family+\beta_{12}Cat.War+\beta_{13}Cat.Strategy+\beta_{14k}Rating.score_{k}$$
+Note that there are four categorical variables in this model, and that rating.score is a categorical variable with four levels, and so will appear 3 times, with one level acting as a base.
+
+```{r regressions}
+#Create a linear regression model
+games.model <- lm(NumOwned ~BayesAvgRating+LanguageEase+ComMinPlaytime+NumAlternates+NumExpansions+NumImplementations+Rank.boardgame+Rank.strategygames+Rank.familygames+Rank.wargames+Cat.Family+Cat.War+Cat.Strategy+rating.score, data = games)
+summary(games.model)
+
+#To ensure that our model is as accurate as possible, we will run a stepwise regression model
+games.step.model <- stepAIC(games.model, direction = "both", trace = FALSE)
+summary(games.step.model)
+```
+The stepwise method reduces our model to $$NumOwned = \beta_{0} +\beta_{1}BayesAvgRating+ \beta_{2}ComMinPlaytime+ \beta_{3}NumAlternates+ \beta_{4}NumExpansions+ \beta_{5}NumImplementations+ \beta_{8}Rank.strategygames+ \beta_{10}Rank.wargames+ \beta_{11}Cat.Family+\beta_{12}Cat.War+\beta_{13}Cat.Strategy+\beta_{14k}Rating.score_{k}$$
+This model indicates to us through t values that Bayes Average Rating and Number of Implementations are the most significant variables.
+Overall, these tell us that we can expect less sales from games with a high minimum play time, war games, strategy games, and games rated particularly highly.  
+We expect the number of alternate versions and implementations, and the number of expansions to contribute to higher sales. Also, while war games and strategy games as categories indicate lower sales, we expect games rated highly in these categories to have increased sales.
+
+### Model Validation
+For total confidence in this model, it must meet the classical linear regression assumptions, as above.  
+To begin, all of our variables are linear or categorical variables handled linearly.
+We can see from our pair.panels plots that none of the independent variables are perfectly collinear with the dependent variable. We must simply assume a zero conditional mean, and an independent and normal error. 
+Next, however, we must acknowledge that the sampling for this data is an aggregation of self-selected data across persons who choose to use the BoardGameGeek.com website, which is far from a statistically advisable random sample. 
+
+Our next step is to check this model with several methods to check its validity, including heteroskedastisity.
+
+First we will check for heteroskedastisity, which is the trend for the error in fitted values to increase as the fitted values themselves increase  
+We will do this through visualization and through the Breuch-Pagan test for heteroskedastisity.
+```{r heteroskedastisity}
+#Visualize by plotting residuals against fitted values
+residulas <- resid(games.step.model)
+fitted <- fitted(games.step.model)
+plot(fitted,residulas) + abline(0,0)
+#Conduct B-P test
+bptest(games.step.model)
+```
+Unfortunately, these results indicate that this model suffers from notable heteroskedastisity.
+In an attempt to remedy this, we recreated the model, while performing a log transformation on the dependant variable, NumOwned, using the same original variables and an identical stepwise process, which will give us a model of the form $$log(y) = \beta_{0} + \beta_{1}x_{1}... \beta_{k}x_{k}$$
+```{r log}
+#Create log transformed model
+games.model.log <- lm(log(NumOwned) ~BayesAvgRating+LanguageEase+ComMinPlaytime+NumAlternates+NumExpansions+NumImplementations+Rank.boardgame+Rank.strategygames+Rank.familygames+Rank.wargames+Cat.Family+Cat.War+Cat.Strategy+rating.score, data = games)
+#Stepwise method
+games.step.model.log <- stepAIC(games.model.log, direction = "both", trace = FALSE)
+summary(games.step.model.log)
+#heteroskedastisity tests for log model
+#Visualize
+residulas.log <- resid(games.step.model.log)
+fitted.log <- fitted(games.step.model.log)
+plot(fitted.log,residulas.log) + abline(0,0)
+#B-P test
+bptest(games.step.model.log)
+```
+These results show us an improvement in skedastisity, where the visualization appear to indicate less of a spreading trend, but the Breuch-Pagan test still returns a unfavorable result.  
+At this point, we have no method to further remedy the heteroskedastisity, as it appears to be a function of the data itself. We will carry on using the log model in all further discussion. Also note that the stepwise method in this instance includes LanguageEase, with a negative coefficient, indicating  games with easier to read rules sell worse.
+
+We next observe the Added-Variable Plots, to see how each variable in the regression contributes to the prediction 'ceteris paribus'
+```{r avplots}
+#Added Variable plots
+avPlots(games.step.model.log)
+```
+In a broad sense, these plots show us that Bayes Avg Rating and Language Ease have the most direct linear relationships with NumOwned, and that many of the other variables show a heavy clump of data points, such that while there is an increase in NumOwned as they increase, it is difficult to describe their behavior as a linear trend. Additionally, many of the factors in the model are categorical, so instead of presenting a trend they are more a comparison of average values for the categories in question.
+
+Next we will check the Variance Inflation Factor (VIF) for the variables in the model, to check for multicollinearity.
+```{r VIF}
+#Check VIF
+vif(games.step.model.log)
+```
+These VIF results are all notably low- the highest being Cat.Strategy's VIF of 4.177933- so we are confident that multicollinearity is not present in the model.
+
+All together, these tests indicate to us that there are notable flaws in the model. The origin of our data is subpar, and our model exhibits heteroskedastisity, which in turn means we cannot assume an independent and normal error. However, given the shortcomings we have noted, we have corrected for them to the best of our ability, and we are confident that we have constructed the best possible model given the data and methods available. We remain convinced that even if the exact results of the model are not certain, the trends presented by this model are still useful, and present useful predictive factors, if not an ability to make precise predictions
+
+### Conclusion
+
+  The intent of this model is to predict sales of board games given multiple factors, to determine the factors that will cause games to sell better in the future. Following, our model tells us that marketing (indicated by number of alternates, expansions, and implementations), quality (indicated by Bayes average rating, rating score, and the category ranks), and complexity (indicated by language ease and minimum playtime) are the best options to increase sales. 
+  What might be most interesting about this model is the negative coefficient for high rating score, indicating that the games considered the very best do not tend to sell the best. While at first counter-intuitive, these predictions appear to follow the trend that the most popular board games are popular largely because of their marketing, or their public image as popular. As an anecdotal example, most people do not consider Monopoly to be the best board game, or even one of their favorites. Despite this, it is easily one of the most recognizable and most purchased board games.
+  Ultimately, using the predictions in this model, a potential producer of a new board game would want to heavily advertise, franchise, and re-release a reasonably complex game of good quality to maximize their sales return.
+
+
+
